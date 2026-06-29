@@ -13,6 +13,7 @@ type Router struct {
 	Updates tgbotapi.UpdatesChannel
 	Bot     *tgbotapi.BotAPI
 	Dialog  *dialog.Dialog
+	FSM     *dialog.FSMContext
 	CHG     handler.CommandHandlerGroup
 	CbHG    handler.CallbackHandlerGroup
 	MHG     handler.MessageHandlerGroup
@@ -22,6 +23,16 @@ type Router struct {
 func (r *Router) RegistrateDialog(dlg *dialog.Dialog) {
 	r.Dialog = dlg
 	r.CbHG.RegisterHandlers(dlg.GetHandlers())
+}
+
+// TODO: Provide storage as interface instead of dirrect redis
+func (r *Router) InitializeFSMContext(ctx context.Context, userID int, storage *dialog.RedisClient) error {
+	res, err := dialog.NewFSMContext(ctx, userID, r.Dialog.States, storage)
+	if err != nil {
+		return err
+	}
+	r.FSM = res
+	return nil
 }
 
 func (r *Router) Route(updates tgbotapi.UpdatesChannel) {
@@ -42,13 +53,22 @@ func (r *Router) Route(updates tgbotapi.UpdatesChannel) {
 // sendMessage(message) - отправляем сообщениеlbackHandler пойдет update
 //
 
+// TODO: #13 сделать отдельном dialog.data storage
+func InitDialogSession(ctx context.Context, FSMContext *dialog.FSMContext, userID int, storage *dialog.RedisClient) (*dialog.DialogSession, error) {
+	state := FSMContext.GetState()
+	return &dialog.DialogSession{
+		State: state,
+	}
+}
+
 func (r *Router) dispatch(update tgbotapi.Update) {
 	data := &handler.HandlerData{
 		Bot:    r.Bot,
 		States: r.States,
 	}
-	var snd dialog.Sender = &r.Bot.
 	ctx := context.Background()
+	dialogManager := dialog.NewDialogManager(r.Dialog)
+
 	switch whatType(update) {
 	case "message":
 		if update.Message != nil && update.Message.IsCommand() {

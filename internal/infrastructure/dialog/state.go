@@ -11,18 +11,19 @@ var (
 	NoStateWithSuchNameError = errors.New("no state with such name")
 )
 
+// TODO : переделать state.data на interface{} чтобы можно было хранить не только string, а map[string]interface{} и т.д. и т.п.
 type State struct {
-	Name string                 `json:"name"`
-	data map[string]interface{} `json:"data"`
+	Name string            `json:"name"`
+	data map[string]string `json:"data"`
 }
 
-func (s *State) getData() map[string]interface{} {
+func (s *State) getData() map[string]string {
 	return s.data
 }
 
-func (s *State) updateData(key string, val interface{}) {
+func (s *State) updateData(key string, val string) {
 	if s.data == nil {
-		s.data = make(map[string]interface{})
+		s.data = make(map[string]string)
 	}
 	s.data[key] = val
 }
@@ -33,6 +34,12 @@ type StateGroup struct {
 
 func (sg *StateGroup) GetState(name string) *State {
 	if state, exists := sg.states[name]; exists {
+		return state
+	}
+	return nil
+}
+func (sg *StateGroup) GetFirstState() *State {
+	for _, state := range sg.states {
 		return state
 	}
 	return nil
@@ -59,18 +66,31 @@ type FSMContext struct {
 	currentState *State
 }
 
-// TODO #3: Добавить обработку что нет в кэше стейта
-// TODO
 // NewFSMContext create new FSMContext to handle chaage in state and dialog cache
-func NewFSMContext(ctx context.Context, userID int, States *StateGroup, storage *cache.RedisClient) *FSMContext {
-	val, _ := storage.HGet(ctx, string(userID), "current_state")
+func NewFSMContext(ctx context.Context, userID int, States *StateGroup, storage *cache.RedisClient) (*FSMContext, error) {
+	val, err := storage.HGet(ctx, string(userID), "current_state")
+	if err != nil {
+		return nil, err
+	}
+	var state *State
+	if val == "" {
+		state = States.GetFirstState()
+	} else {
+		state = States.GetState(val)
+	}
+	if state == nil {
+		return nil, NoStateWithSuchNameError
+	}
+	state.data, err = storage.HGetAll(ctx, string(userID)+":"+state.Name)
+	if err != nil {
+		return nil, err
+	}
 	return &FSMContext{
 		userID:       userID,
 		States:       States,
 		Storage:      storage,
-		currentState: States.GetState(val),
-	}
-
+		currentState: state,
+	}, nil
 }
 
 // GetState return current State
@@ -97,7 +117,7 @@ func (fsm *FSMContext) GetCurrentStateData(ctx context.Context) map[string]strin
 	return res
 }
 
-func (fsm *FSMContext) UpdateStateData(ctx context.Context, key string, val interface{}) {
+func (fsm *FSMContext) UpdateStateData(ctx context.Context, key string, val string) {
 	fsm.Storage.HSet(ctx, string(fsm.userID)+":"+fsm.currentState.Name, key, val)
 	fsm.currentState.updateData(key, val)
 	// userid + ":" + stateName + ":" + key = state_data
@@ -108,7 +128,7 @@ func (fsm *FSMContext) DeleteData(ctx context.Context, key string) {
 	delete(fsm.currentState.getData(), key)
 }
 
-// TODO #9: Добавить метод очистки всех данных для пользователя, судя по всему   
+// TODO #9: Добавить метод очистки всех данных для пользователя, судя по всему
 
 func (fsm *FSMContext) Clear(ctx context.Context) error {
 	err := fsm.Storage.Delete(ctx, string(fsm.userID))
