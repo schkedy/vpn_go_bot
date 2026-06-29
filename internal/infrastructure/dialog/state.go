@@ -108,8 +108,8 @@ func (fsm *FSMContext) DeleteData(ctx context.Context, key string) {
 	delete(fsm.currentState.getData(), key)
 }
 
-// TODO #4: Добавить метод очистки всех данных для пользователя, судя по всему
-// такое не удалит все данные  в redis
+// TODO #9: Добавить метод очистки всех данных для пользователя, судя по всему   
+
 func (fsm *FSMContext) Clear(ctx context.Context) error {
 	err := fsm.Storage.Delete(ctx, string(fsm.userID))
 	if err != nil {

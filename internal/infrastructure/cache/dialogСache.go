@@ -1,22 +1,29 @@
 package cache
 
 import (
-	"context"
-	"errors"
+    "context"
+    "errors"
 )
 
-var ErrSessionNotFound = errors.New("dialog session not found")
+var (
+    ErrSessionNotFound     = errors.New("dialog session not found")
+    ErrWidgetStateNotFound = errors.New("widget state not found")
+)
 
-type DialogSession struct {
-	ChatID     int64                  `json:"chat_id"`
-	UserID     int64                  `json:"user_id"`
-	MessageID  int                    `json:"message_id"`
-	State      string                 `json:"state"`
-	DialogData map[string]interface{} `json:"dialog_data"`
+// DialogSessionSnapshot — минимальный сериализуемый срез сессии диалога.
+type DialogSessionSnapshot struct {
+    MessageID  int64                  `json:"message_id"`
+    State      string                 `json:"state"`
+    DialogData map[string]interface{} `json:"dialog_data"`
 }
 
-type DialogCache interface {
-	SaveSession(ctx context.Context, session *DialogSession) error
-	GetSession(ctx context.Context, userID int64) (*DialogSession, error)
-	DeleteSession(ctx context.Context, userID int64) error
+// DialogStateStore — единый контракт для хранения состояния диалога и виджетов.
+type DialogStateStore interface {
+    GetSession(ctx context.Context, userID int64) (*DialogSessionSnapshot, error)
+    SaveSession(ctx context.Context, userID int64, session *DialogSessionSnapshot) error
+    DeleteSession(ctx context.Context, userID int64) error
+
+    GetWidgetState(ctx context.Context, userID int64, state string, widgetID string, out interface{}) error
+    SetWidgetState(ctx context.Context, userID int64, state string, widgetID string, in interface{}) error
+    DeleteWidgetState(ctx context.Context, userID int64, state string, widgetID string) error
 }

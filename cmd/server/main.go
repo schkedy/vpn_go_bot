@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"time"
+	"vpn_go_bot/internal/infrastructure/router"
 
 	tgbotapi "github.com/OvyFlash/telegram-bot-api"
 )
@@ -33,7 +34,6 @@ func main() {
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
-
 	updates := bot.GetUpdatesChan(u)
 
 	for update := range updates {
@@ -41,7 +41,7 @@ func main() {
 			continue
 		}
 
-		// photoMsg := tgbotapi.NewPhoto(update.Message.Chat.ID, tgbotapi.FileURL(photoURL))
+		photoMsg := tgbotapi.NewPhoto(update.Message.Chat.ID, tgbotapi.FileURL(photoURL))
 		// photoMsg.Caption = "Here is a photo!"
 		// photoMsg.ReplyMarkup = keyboard
 		Msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Here is a message with buttons!")
@@ -64,12 +64,16 @@ func main() {
 			log.Printf("edit message media error: %v", err)
 			continue
 		}
+		b := tgbotapi.NewBaseInputMedia("photo",tgbotapi.FileURL("https://cdn.pixabay.com/photo/2015/04/23/22/00/tree-736885_1280.jpg"))
+	
 		time.Sleep(2 * time.Second)
-		_, err = bot.EditMessageCaption(
-			update.Message.Chat.ID,
-			sentPhoto.MessageID,
-			"New text with buttons!",
-		)
+		var a tgbotapi.Chattable = photoMsg
+		a
+		// _, err = bot.EditMessageCaptionAndMarkup(
+		// 	update.Message.Chat.ID,
+		// 	sentPhoto.MessageID,
+		// 	"New text with buttons!",
+		// )
 		if err != nil {
 			log.Printf("edit message text error: %v", err)
 			continue
