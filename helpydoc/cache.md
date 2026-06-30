@@ -53,8 +53,8 @@
 
 Структура хранения в кэше:
 
-UserID -> Dialog -> data
-                 -> DialogSession -> CurrentState
+UserID -> Dialog -> dilaog_data
+                 -> dialog_session -> CurrentState
                                   -> MessageID
 
        -> StateName -> data

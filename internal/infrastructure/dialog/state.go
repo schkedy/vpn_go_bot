@@ -105,6 +105,10 @@ func (fsm *FSMContext) SetState(ctx context.Context, stateName string) error {
 	if err != nil {
 		return err
 	}
+	fsm.currentState.data, err = fsm.Storage.HGetAll(ctx, string(fsm.userID)+":"+stateName)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 

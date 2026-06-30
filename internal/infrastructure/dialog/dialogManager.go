@@ -1,32 +1,71 @@
 package dialog
 
 import (
+	"context"
+	"errors"
+	"strconv"
+	"vpn_go_bot/internal/infrastructure/cache"
+
 	tgbotapi "github.com/OvyFlash/telegram-bot-api"
 )
+
+var NoDialogSessionInStorageError error = errors.New("no dialog session in storage")
 
 type DialogManager struct {
 	Session *DialogSession
 	dialog  *Dialog
 	sender  tgbotapi.BotAPI // TODO sender должен уметь отправлять сообщения, редактировать, удалять и т.д. в зависимости от того что нужно для рендера окна
-	deps map[string]interface{}
+	FSM     *FSMContext
+	deps    map[string]interface{}
 }
+
+//
 
 // Dialog Manager Context uses for data which you get
 // Хранится в Redis, ключ = userID (или chatID)
 type DialogSession struct {
-	State     State
 	MessageID int
 	ChatID    int64
 	UserID    int64
-	Data      map[string]interface{}
+	Data      map[string]string
 }
 
-func NewDialogManager(dialog *Dialog) *DialogManager {
-	return &DialogManager{
-		dialog:  dialog,
-		Session: &DialogSession{},
-		sender:  Sender,
+// TODO : Сделать приведение string к interface{}
+func (ds *DialogSession) DownloadFromStorage(ctx context.Context, storage *cache.RedisClient, userID int64) error {
+	hashKeySession := "dialog_session:" + string(userID)
+	hashKeyData := "dialog_data:" + string(userID)
+	sessionData, err := storage.HGetAll(ctx, hashKeySession)
+	if sessionData == nil {
+		return NoDialogSessionInStorageError
 	}
+	if err != nil {
+		return err
+	}
+	data, err := storage.HGetAll(ctx, hashKeyData)
+	if err != nil {
+		return err
+	}
+	ds.MessageID, _ = strconv.Atoi(sessionData["MessageID"])
+	ds.ChatID, _ = strconv.ParseInt(sessionData["ChatID"], 10, 64)
+	ds.UserID, _ = strconv.ParseInt(sessionData["UserID"], 10, 64)
+	ds.Data = data
+	return nil
+}
+
+// TODO : закончить, нужно правильно сохранениеи DialogSession.Data
+// update,
+func NewDialogManager(
+	ctx context.Context,
+	update tgbotapi.Update,
+	dialog *Dialog,
+	sender tgbotapi.BotAPI,
+	FSM *FSMContext,
+	deps map[string]interface{},
+	storage *cache.RedisClient,
+) (*DialogManager, error) {
+
+	// DialogSession take
+
 }
 
 // TODO: сделать проверку на то предыдущее сообщение либо текстовое либо медиа и
