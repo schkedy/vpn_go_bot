@@ -31,24 +31,73 @@ type DialogSession struct {
 }
 
 // TODO : Сделать приведение string к interface{}
-func (ds *DialogSession) DownloadFromStorage(ctx context.Context, storage *cache.RedisClient, userID int64) error {
+func newDialogSession(userID int64, chatID int64, messageID int) *DialogSession {
+	return &DialogSession{
+		MessageID: messageID,
+		ChatID:    chatID,
+		UserID:    userID,
+		Data:      make(map[string]string),
+	}
+}
+
+func NewDialogSessionFromStorage(ctx context.Context, storage *cache.RedisClient, userID int64) (*DialogSession, error) {
 	hashKeySession := "dialog_session:" + string(userID)
 	hashKeyData := "dialog_data:" + string(userID)
 	sessionData, err := storage.HGetAll(ctx, hashKeySession)
 	if sessionData == nil {
-		return NoDialogSessionInStorageError
+		return nil, NoDialogSessionInStorageError
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	data, err := storage.HGetAll(ctx, hashKeyData)
 	if err != nil {
+		return nil, err
+	}
+	MessageID, err := strconv.Atoi(sessionData["MessageID"])
+	if err != nil {
+		return nil, err
+	}
+	ChatID, err := strconv.ParseInt(sessionData["ChatID"], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	UserID, err := strconv.ParseInt(sessionData["UserID"], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+
+	dialogSession := &DialogSession{
+		MessageID: MessageID,
+		ChatID:    ChatID,
+		UserID:    UserID,
+		Data:      data,
+	}
+	return dialogSession, nil
+
+}
+
+func (ds *DialogSession) SaveToStorage(ctx context.Context, storage *cache.RedisClient) error {
+	hashKeySession := "dialog_session:" + string(ds.UserID)
+	hashKeyData := "dialog_data:" + string(ds.UserID)
+	err := storage.HSet(ctx, hashKeySession, "MessageID", ds.MessageID)
+	if err != nil {
 		return err
 	}
-	ds.MessageID, _ = strconv.Atoi(sessionData["MessageID"])
-	ds.ChatID, _ = strconv.ParseInt(sessionData["ChatID"], 10, 64)
-	ds.UserID, _ = strconv.ParseInt(sessionData["UserID"], 10, 64)
-	ds.Data = data
+	err = storage.HSet(ctx, hashKeySession, "ChatID", ds.ChatID)
+	if err != nil {
+		return err
+	}
+	err = storage.HSet(ctx, hashKeySession, "UserID", ds.UserID)
+	if err != nil {
+		return err
+	}
+	for key, value := range ds.Data {
+		err = storage.HSet(ctx, hashKeyData, key, value)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -63,9 +112,23 @@ func NewDialogManager(
 	deps map[string]interface{},
 	storage *cache.RedisClient,
 ) (*DialogManager, error) {
+	dialogSession, err := NewDialogSessionFromStorage(ctx, storage, int64(update.Message.From.ID))
+	switch err {
+	case NoDialogSessionInStorageError:
+		dialogSession = newDialogSession(int64(update.Message.From.ID), update.Message.Chat.ID, -1)
+	case nil:
+	default:
+		return nil, err
+	}
 
-	// DialogSession take
-
+	dialogManager := &DialogManager{
+		Session: dialogSession,
+		dialog:  dialog,
+		sender:  sender,
+		FSM:     FSM,
+		deps:    deps,
+	}
+	return dialogManager, nil
 }
 
 // TODO: сделать проверку на то предыдущее сообщение либо текстовое либо медиа и
