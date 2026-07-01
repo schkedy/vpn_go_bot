@@ -2,6 +2,7 @@ package dialog
 
 import (
 	"bytes"
+	"context"
 	"text/template"
 
 	tgbotapi "github.com/OvyFlash/telegram-bot-api"
@@ -38,11 +39,11 @@ type WindowConfig struct {
 }
 
 // RenderAll as collection point, render all window and pass dialogManager to widgets
-func (w *Window) RenderAll(dialogManager *DialogManager) WindowConfig {
-	data := w.getGetterData(dialogManager)
+func (w *Window) RenderAll(ctx context.Context, dialogManager *DialogManager) WindowConfig {
+	data := w.getGetterData(ctx, dialogManager)
 	text := w.renderText(data)
-	keyboard := w.renderWidgets(data)
-	media := w.renderMedia(data)
+	keyboard := w.renderWidgets(ctx, *dialogManager.FSM, data)
+	media := w.renderMedia(ctx, *dialogManager.FSM, data)
 
 	return WindowConfig{
 		Text:     text,
@@ -67,10 +68,10 @@ func (w *Window) renderText(data map[string]interface{}) string {
 }
 
 // renderMedia collect media from widgets  first and Window.media second
-func (w *Window) renderMedia(data map[string]interface{}) *Media {
+func (w *Window) renderMedia(ctx context.Context, fsm FSMContext, data map[string]interface{}) *Media {
 	for _, widget := range w.widgets {
 		if provider, ok := widget.(MediaProvider); ok {
-			if m := provider.GetCurrentMedia(data); m != nil {
+			if m := provider.GetCurrentMedia(ctx, fsm, data); m != nil {
 				return m
 			}
 		}
@@ -84,11 +85,11 @@ func (w *Window) renderMedia(data map[string]interface{}) *Media {
 }
 
 // renderWidgets collect all widgets into one InlineKeyboardMarkup
-func (w *Window) renderWidgets(data map[string]interface{}) tgbotapi.InlineKeyboardMarkup {
+func (w *Window) renderWidgets(ctx context.Context, fsm FSMContext, data map[string]interface{}) tgbotapi.InlineKeyboardMarkup {
 	markup := tgbotapi.NewInlineKeyboardMarkup()
 
 	for _, widget := range w.widgets {
-		for _, row := range widget.getButtonRows(data) {
+		for _, row := range widget.getButtonRows(ctx, fsm, data) {
 			keyboardRow := make([]tgbotapi.InlineKeyboardButton, 0, len(row.Buttons))
 			for _, button := range row.Buttons {
 				renderedButton := button.ToInlineKeyboardButton(data)
@@ -148,11 +149,11 @@ func (w *Window) BindDialogManager(dialogManager *DialogManager) {
 }
 
 // Collect getterData
-func (w *Window) getGetterData(dialogManager *DialogManager) map[string]interface{} {
+func (w *Window) getGetterData(ctx context.Context, dialogManager *DialogManager) map[string]interface{} {
 	var data map[string]interface{}
 
 	if w.Getter != nil {
-		data = w.Getter(dialogManager.Session, dialogManager.deps)
+		data = w.Getter(ctx, dialogManager.FSM, dialogManager.Session, dialogManager.deps)
 	}
 
 	if data == nil {
