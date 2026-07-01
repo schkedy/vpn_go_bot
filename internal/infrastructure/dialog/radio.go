@@ -5,10 +5,9 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"sync"
 	"text/template"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	tgbotapi "github.com/OvyFlash/telegram-bot-api"
 )
 
 type RadioItem struct {
@@ -16,12 +15,12 @@ type RadioItem struct {
 	Value string
 }
 
-type RadioOnItemClick func(ctx context.Context, data *handler.HandlerData, update *tgbotapi.Update, dialogManager *DialogManager, item RadioItem)
+type RadioOnItemClick func(ctx context.Context, dialogManager *DialogManager, update *tgbotapi.Update, item RadioItem)
 
-type RadioOnStateChanged func(ctx context.Context, data *handler.HandlerData, update *tgbotapi.Update, previousItemID int, currentItemID int)
+type RadioOnStateChanged func(ctx context.Context, dialogManager *DialogManager, update *tgbotapi.Update, previousItemID int, currentItemID int)
 
-// Radio — stateful widget по аналогии с aiogram-dialog Radio:
-// при нажатии на item делает его checked, снимая checked с предыдущего.
+// Radio — виджет по аналогии с aiogram-dialog Radio:
+// checked-состояние хранится в FSMContext, а не в самом виджете.
 type Radio struct {
 	ID string
 
@@ -33,12 +32,9 @@ type Radio struct {
 
 	onItemClick    RadioOnItemClick
 	onStateChanged RadioOnStateChanged
-	dialogManager  *DialogManager
-
-	mu            sync.RWMutex
-	checkedItemID int
 }
 
+// NewRadio создаёт новый виджет Radio и компилирует шаблоны текста для checked/unchecked состояний.
 func NewRadio(
 	id string,
 	checkedText string,
@@ -63,32 +59,27 @@ func NewRadio(
 		Width:                 width,
 		onItemClick:           onItemClick,
 		onStateChanged:        onStateChanged,
-		checkedItemID:         -1,
 	}
 }
 
-func (r *Radio) GetChecked() int {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	return r.checkedItemID
+// GetChecked возвращает ID выбранного элемента из FSM, либо -1 если выбор не установлен.
+func (r *Radio) GetChecked(ctx context.Context, fsm FSMContext) int {
+	_ = ctx
+	return r.readIntFromFSM(fsm, r.checkedItemKey(), -1)
 }
 
-func (r *Radio) IsChecked(itemID int) bool {
-	return r.GetChecked() == itemID
+// IsChecked проверяет, выбран ли элемент с переданным ID.
+func (r *Radio) IsChecked(ctx context.Context, fsm FSMContext, itemID int) bool {
+	return r.GetChecked(ctx, fsm) == itemID
 }
 
-func (r *Radio) SetChecked(itemID int) {
-	r.mu.Lock()
-	r.checkedItemID = itemID
-	r.mu.Unlock()
+// SetChecked сохраняет выбранный ID элемента в FSM.
+func (r *Radio) SetChecked(ctx context.Context, dialogManager *DialogManager, itemID int) {
+	r.writeIntToFSM(ctx, dialogManager, r.checkedItemKey(), itemID)
 }
 
-func (r *Radio) SetDialogManager(dialogManager *DialogManager) {
-	r.dialogManager = dialogManager
-}
-
-func (r *Radio) getButtonRows(data map[string]interface{}) []ButtonRow {
+// getButtonRows строит строки кнопок Radio на основе элементов из getter data.
+func (r *Radio) getButtonRows(ctx context.Context, fsm FSMContext, data map[string]interface{}) []ButtonRow {
 	if r == nil {
 		return nil
 	}
@@ -102,7 +93,7 @@ func (r *Radio) getButtonRows(data map[string]interface{}) []ButtonRow {
 	currentRow := make([]*Button, 0, r.Width)
 
 	for _, item := range items {
-		buttonText := r.renderItemText(data, item)
+		buttonText := r.renderItemText(ctx, fsm, data, item)
 		button := NewButton(buttonText, r.callbackData(item.ID), nil, "")
 		currentRow = append(currentRow, button)
 
@@ -119,48 +110,57 @@ func (r *Radio) getButtonRows(data map[string]interface{}) []ButtonRow {
 	return rows
 }
 
-func (r *Radio) getHandlers() map[string]handler.HandlerFunc {
-	handlers := make(map[string]handler.HandlerFunc)
+// getHandlers регистрирует callback-обработчик выбора элемента Radio.
+func (r *Radio) getHandlers() map[string]HandlerFunc {
+	handlers := make(map[string]HandlerFunc)
 	if r == nil {
 		return handlers
 	}
 
 	callbackPrefix := r.callbackPrefix()
-	handlers[callbackPrefix] = func(ctx context.Context, data *handler.HandlerData, update *tgbotapi.Update) {
+	handlers[callbackPrefix] = func(ctx context.Context, dialogManager *DialogManager, update *tgbotapi.Update) {
 		itemID := r.parseItemID(update)
 		if itemID < 0 {
 			return
 		}
 
-		items := r.resolveItems(r.resolveHandlerData(data))
+		items := r.resolveItems(r.resolveHandlerData(ctx, dialogManager))
 		selectedItem, ok := r.findItemByID(items, itemID)
 		if !ok {
 			selectedItem = RadioItem{ID: itemID}
 		}
 
-		previousItemID := r.GetChecked()
-		r.SetChecked(selectedItem.ID)
+		previousItemID := r.readIntFromDialogManagerFSM(ctx, dialogManager, r.checkedItemKey(), -1)
+		r.writeIntToFSM(ctx, dialogManager, r.checkedItemKey(), selectedItem.ID)
 
 		if r.onItemClick != nil {
-			r.onItemClick(ctx, data, update, r.dialogManager, selectedItem)
+			r.onItemClick(ctx, dialogManager, update, selectedItem)
 		}
 
 		if previousItemID != selectedItem.ID && r.onStateChanged != nil {
-			r.onStateChanged(ctx, data, update, previousItemID, selectedItem.ID)
+			r.onStateChanged(ctx, dialogManager, update, previousItemID, selectedItem.ID)
 		}
 	}
 
 	return handlers
 }
 
+// callbackData формирует callback_data для конкретного элемента Radio.
 func (r *Radio) callbackData(itemID int) string {
 	return fmt.Sprintf("radio:%s:%d", r.ID, itemID)
 }
 
+// callbackPrefix возвращает префикс callback_data для маршрутизации обработчика Radio.
 func (r *Radio) callbackPrefix() string {
 	return fmt.Sprintf("radio:%s:", r.ID)
 }
 
+// checkedItemKey возвращает ключ состояния выбранного элемента в FSM.
+func (r *Radio) checkedItemKey() string {
+	return fmt.Sprintf("radio:%s:checked_item_id", r.ID)
+}
+
+// parseItemID извлекает ID выбранного элемента из callback update.
 func (r *Radio) parseItemID(update *tgbotapi.Update) int {
 	if update == nil || update.CallbackQuery == nil {
 		return -1
@@ -180,6 +180,7 @@ func (r *Radio) parseItemID(update *tgbotapi.Update) int {
 	return itemID
 }
 
+// findItemByID ищет элемент по ID в списке и возвращает его вместе с признаком успеха.
 func (r *Radio) findItemByID(items []RadioItem, itemID int) (RadioItem, bool) {
 	for _, item := range items {
 		if item.ID == itemID {
@@ -189,17 +190,24 @@ func (r *Radio) findItemByID(items []RadioItem, itemID int) (RadioItem, bool) {
 	return RadioItem{}, false
 }
 
-func (r *Radio) resolveHandlerData(handlerData *handler.HandlerData) map[string]interface{} {
-	if handlerData == nil || handlerData.GetterData == nil {
+// resolveHandlerData получает актуальные getter data для текущего окна через DialogManager.
+func (r *Radio) resolveHandlerData(ctx context.Context, dialogManager *DialogManager) map[string]interface{} {
+	if dialogManager == nil || dialogManager.dialog == nil || dialogManager.FSM == nil {
 		return map[string]interface{}{}
 	}
 
-	return handlerData.GetterData
+	window := dialogManager.dialog.GetWindow(*dialogManager.FSM.GetState())
+	if window == nil {
+		return map[string]interface{}{}
+	}
+
+	return window.getGetterData(ctx, dialogManager)
 }
 
-func (r *Radio) renderItemText(data map[string]interface{}, item RadioItem) string {
+// renderItemText рендерит текст кнопки элемента по шаблону с учётом checked-состояния.
+func (r *Radio) renderItemText(ctx context.Context, fsm FSMContext, data map[string]interface{}, item RadioItem) string {
 	tmpl := r.uncheckedTextTemplate
-	if r.IsChecked(item.ID) {
+	if r.IsChecked(ctx, fsm, item.ID) {
 		tmpl = r.checkedTextTemplate
 	}
 
@@ -213,7 +221,7 @@ func (r *Radio) renderItemText(data map[string]interface{}, item RadioItem) stri
 	}
 	templateData["item"] = item.Value
 	templateData["item_id"] = item.ID
-	templateData["checked"] = r.IsChecked(item.ID)
+	templateData["checked"] = r.IsChecked(ctx, fsm, item.ID)
 
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, templateData); err != nil {
@@ -223,6 +231,7 @@ func (r *Radio) renderItemText(data map[string]interface{}, item RadioItem) stri
 	return buf.String()
 }
 
+// resolveItems достаёт список элементов Radio из getter data по ключу r.Items.
 func (r *Radio) resolveItems(data map[string]interface{}) []RadioItem {
 	if r == nil || r.Items == "" || data == nil {
 		return nil
@@ -239,4 +248,41 @@ func (r *Radio) resolveItems(data map[string]interface{}) []RadioItem {
 	}
 
 	return items
+}
+
+// readIntFromDialogManagerFSM читает числовое значение из FSM через DialogManager, либо возвращает fallback.
+func (r *Radio) readIntFromDialogManagerFSM(ctx context.Context, dialogManager *DialogManager, key string, fallback int) int {
+	if dialogManager == nil || dialogManager.FSM == nil {
+		return fallback
+	}
+	return r.readIntFromFSM(*dialogManager.FSM, key, fallback)
+}
+
+// readIntFromFSM читает int по ключу из текущего state FSM, иначе возвращает fallback.
+func (r *Radio) readIntFromFSM(fsm FSMContext, key string, fallback int) int {
+	state := fsm.GetState()
+	if state == nil {
+		return fallback
+	}
+
+	value, exists := state.getData()[key]
+	if !exists || value == "" {
+		return fallback
+	}
+
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+
+	return parsed
+}
+
+// writeIntToFSM сохраняет числовое значение в FSM как строку по переданному ключу.
+func (r *Radio) writeIntToFSM(ctx context.Context, dialogManager *DialogManager, key string, value int) {
+	if dialogManager == nil || dialogManager.FSM == nil {
+		return
+	}
+
+	dialogManager.FSM.UpdateStateData(ctx, key, strconv.Itoa(value))
 }

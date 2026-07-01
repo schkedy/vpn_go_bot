@@ -2,21 +2,18 @@ package dialog
 
 import (
 	"context"
-	"errors"
-	"strconv"
 	"vpn_go_bot/internal/infrastructure/cache"
 
 	tgbotapi "github.com/OvyFlash/telegram-bot-api"
 )
 
-var NoDialogSessionInStorageError error = errors.New("no dialog session in storage")
-
 type DialogManager struct {
-	Session *DialogSession
-	dialog  *Dialog
-	sender  tgbotapi.BotAPI // TODO sender должен уметь отправлять сообщения, редактировать, удалять и т.д. в зависимости от того что нужно для рендера окна
-	FSM     *FSMContext
-	deps    map[string]interface{}
+	Session        *DialogSession
+	sessionStorage *DialogSessionStorage
+	dialog         *Dialog
+	sender         tgbotapi.BotAPI // TODO sender должен уметь отправлять сообщения, редактировать, удалять и т.д. в зависимости от того что нужно для рендера окна
+	FSM            *FSMContext
+	deps           map[string]interface{}
 }
 
 //
@@ -40,67 +37,6 @@ func newDialogSession(userID int64, chatID int64, messageID int) *DialogSession 
 	}
 }
 
-func NewDialogSessionFromStorage(ctx context.Context, storage *cache.RedisClient, userID int64) (*DialogSession, error) {
-	hashKeySession := "dialog_session:" + string(userID)
-	hashKeyData := "dialog_data:" + string(userID)
-	sessionData, err := storage.HGetAll(ctx, hashKeySession)
-	if sessionData == nil {
-		return nil, NoDialogSessionInStorageError
-	}
-	if err != nil {
-		return nil, err
-	}
-	data, err := storage.HGetAll(ctx, hashKeyData)
-	if err != nil {
-		return nil, err
-	}
-	MessageID, err := strconv.Atoi(sessionData["MessageID"])
-	if err != nil {
-		return nil, err
-	}
-	ChatID, err := strconv.ParseInt(sessionData["ChatID"], 10, 64)
-	if err != nil {
-		return nil, err
-	}
-	UserID, err := strconv.ParseInt(sessionData["UserID"], 10, 64)
-	if err != nil {
-		return nil, err
-	}
-
-	dialogSession := &DialogSession{
-		MessageID: MessageID,
-		ChatID:    ChatID,
-		UserID:    UserID,
-		Data:      data,
-	}
-	return dialogSession, nil
-
-}
-
-func (ds *DialogSession) SaveToStorage(ctx context.Context, storage *cache.RedisClient) error {
-	hashKeySession := "dialog_session:" + string(ds.UserID)
-	hashKeyData := "dialog_data:" + string(ds.UserID)
-	err := storage.HSet(ctx, hashKeySession, "MessageID", ds.MessageID)
-	if err != nil {
-		return err
-	}
-	err = storage.HSet(ctx, hashKeySession, "ChatID", ds.ChatID)
-	if err != nil {
-		return err
-	}
-	err = storage.HSet(ctx, hashKeySession, "UserID", ds.UserID)
-	if err != nil {
-		return err
-	}
-	for key, value := range ds.Data {
-		err = storage.HSet(ctx, hashKeyData, key, value)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // TODO : закончить, нужно правильно сохранениеи DialogSession.Data
 // update,
 func NewDialogManager(
@@ -112,10 +48,12 @@ func NewDialogManager(
 	deps map[string]interface{},
 	storage *cache.RedisClient,
 ) (*DialogManager, error) {
-	dialogSession, err := NewDialogSessionFromStorage(ctx, storage, int64(update.Message.From.ID))
+
+	sessionStorage := NewDialogSessionStorage(storage)
+	dialogSession, err := sessionStorage.GetSession(ctx, update.Message.From.ID)
 	switch err {
 	case NoDialogSessionInStorageError:
-		dialogSession = newDialogSession(int64(update.Message.From.ID), update.Message.Chat.ID, -1)
+		dialogSession = newDialogSession(update.Message.From.ID, update.Message.Chat.ID, -1)
 	case nil:
 	default:
 		return nil, err
@@ -131,15 +69,24 @@ func NewDialogManager(
 	return dialogManager, nil
 }
 
+func (dm *DialogManager) SaveSessionToStorage(ctx context.Context, storage *cache.RedisClient) error {
+	sessionStorage := NewDialogSessionStorage(storage)
+	err := sessionStorage.SaveSession(ctx, dm.Session)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 // TODO: сделать проверку на то предыдущее сообщение либо текстовое либо медиа и
 // в зависимости от этого редактировать его или отправлять новое
 // TODO: добавить дату для сессии
-func (dm *DialogManager) RenderWindow() {
-	currentState := dm.Session.State
+func (dm *DialogManager) RenderWindow(ctx context.Context) {
+	currentState := *dm.FSM.currentState
 	if dm.dialog == nil {
 		return
 	}
-	msgConfig := dm.dialog.GetWindow(currentState).RenderAll()
+	msgConfig := dm.dialog.GetWindow(currentState).RenderAll(ctx, dm)
 	if msgConfig.Media != nil {
 		mediaMsg := dm.RenderMedia(msgConfig)
 		if mediaMsg != nil {

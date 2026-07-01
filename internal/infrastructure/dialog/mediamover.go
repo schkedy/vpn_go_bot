@@ -3,29 +3,22 @@ package dialog
 import (
 	"context"
 	"fmt"
-	"sync"
+	"strconv"
 
 	tgbotapi "github.com/OvyFlash/telegram-bot-api"
 )
-
-// TODO MediaMover.ID  должен браться на  основе прикрпленния к пользователю диалога или нет, надо узнать как колбэк будет понимать
-// к какому именно MediaMover он относится, если таких виджетов несколько в одном окне
 
 // MediaMoverOnSelect — пользовательский колбэк при выборе медиа пользователем.
 type MediaMoverOnSelect func(ctx context.Context, dialogManager *DialogManager, update *tgbotapi.Update, index int, media Media)
 
 // MediaMover — виджет, отображающий список медиа в виде пронумерованных кнопок с постраничной навигацией.
-// Реализует Widget и MediaProvider.
+// Не хранит состояние внутри себя: текущая страница и выбранный индекс берутся из FSMContext.
 type MediaMover struct {
 	ID       string
 	Items    string // ключ в getter data, по которому лежит []Media
 	PageSize int    // количество кнопок-медиа на одной странице
 
 	onSelect MediaMoverOnSelect
-
-	mu          sync.RWMutex
-	currentPage int // 0-based
-	selectedIdx int // глобальный индекс выбранного медиа, -1 = ничего не выбрано
 }
 
 func NewMediaMover(id string, items string, pageSize int, onSelect MediaMoverOnSelect) *MediaMover {
@@ -34,57 +27,51 @@ func NewMediaMover(id string, items string, pageSize int, onSelect MediaMoverOnS
 	}
 
 	return &MediaMover{
-		ID:          id,
-		Items:       items,
-		PageSize:    pageSize,
-		onSelect:    onSelect,
-		selectedIdx: -1,
+		ID:       id,
+		Items:    items,
+		PageSize: pageSize,
+		onSelect: onSelect,
 	}
 }
 
 // GetSelectedIndex возвращает глобальный индекс выбранного медиа или -1.
-func (m *MediaMover) GetSelectedIndex() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	return m.selectedIdx
+func (m *MediaMover) GetSelectedIndex(ctx context.Context, fsm FSMContext) int {
+	_ = ctx
+	return m.readIntFromFSM(fsm, m.selectedIndexKey(), -1)
 }
 
 // GetCurrentPage возвращает текущую страницу (0-based).
-func (m *MediaMover) GetCurrentPage() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	return m.currentPage
+func (m *MediaMover) GetCurrentPage(ctx context.Context, fsm FSMContext) int {
+	_ = ctx
+	page := m.readIntFromFSM(fsm, m.currentPageKey(), 0)
+	if page < 0 {
+		return 0
+	}
+	return page
 }
 
-// SetSelectedIndex принудительно устанавливает выбранный индекс.
-func (m *MediaMover) SetSelectedIndex(idx int) {
-	m.mu.Lock()
-	m.selectedIdx = idx
-	m.mu.Unlock()
+// SetSelectedIndex принудительно устанавливает выбранный индекс в FSMContext.
+func (m *MediaMover) SetSelectedIndex(ctx context.Context, dialogManager *DialogManager, idx int) {
+	m.writeIntToFSM(ctx, dialogManager, m.selectedIndexKey(), idx)
 }
 
 // GetCurrentMedia реализует MediaProvider — возвращает текущее выбранное медиа как *Media для рендера окна.
-func (m *MediaMover) GetCurrentMedia(data map[string]interface{}) *Media {
+func (m *MediaMover) GetCurrentMedia(ctx context.Context, fsm FSMContext, data map[string]interface{}) *Media {
 	items := m.resolveItems(data)
-
-	m.mu.RLock()
-	idx := m.selectedIdx
-	m.mu.RUnlock()
+	idx := m.GetSelectedIndex(ctx, fsm)
 
 	if idx < 0 || idx >= len(items) {
 		return nil
 	}
 
-	copy := items[idx]
-	return &copy
+	copyItem := items[idx]
+	return &copyItem
 }
 
 // getButtonRows строит строки кнопок:
 //  1. Строка пронумерованных кнопок (1, 2, ...) для медиа текущей страницы
 //  2. Строка пагинации (< · N/Total · >) — только если элементов больше чем PageSize
-func (m *MediaMover) getButtonRows(data map[string]interface{}) []ButtonRow {
+func (m *MediaMover) getButtonRows(ctx context.Context, fsm FSMContext, data map[string]interface{}) []ButtonRow {
 	if m == nil {
 		return nil
 	}
@@ -94,10 +81,7 @@ func (m *MediaMover) getButtonRows(data map[string]interface{}) []ButtonRow {
 		return nil
 	}
 
-	m.mu.RLock()
-	page := m.currentPage
-	m.mu.RUnlock()
-
+	page := m.GetCurrentPage(ctx, fsm)
 	totalPages := (len(items) + m.PageSize - 1) / m.PageSize
 	if page >= totalPages {
 		page = totalPages - 1
@@ -111,21 +95,16 @@ func (m *MediaMover) getButtonRows(data map[string]interface{}) []ButtonRow {
 
 	pageItems := items[start:end]
 
-	// строка с пронумерованными кнопками медиа
 	mediaRow := make([]*Button, 0, len(pageItems))
-	for i, item := range pageItems {
+	for i := range pageItems {
 		globalIdx := start + i
 		label := fmt.Sprintf("%d", globalIdx+1)
 		cb := m.callbackSelect(globalIdx)
-
-		_ = item // globalIdx несёт всю нужную информацию; item используется в handler
-		btn := NewButton(label, cb, nil, "")
-		mediaRow = append(mediaRow, btn)
+		mediaRow = append(mediaRow, NewButton(label, cb, nil, ""))
 	}
 
 	rows := []ButtonRow{{Buttons: mediaRow}}
 
-	// строка пагинации — только если элементов больше чем PageSize
 	if len(items) > m.PageSize {
 		pageLabel := fmt.Sprintf("%d/%d", page+1, totalPages)
 		prevBtn := NewButton("‹", m.callbackPrev(), nil, "")
@@ -151,53 +130,56 @@ func (m *MediaMover) getHandlers() map[string]HandlerFunc {
 			return
 		}
 
-		items := m.resolveItems(m.resolveHandlerData(handlerData))
+		items := m.resolveItems(m.resolveHandlerData(ctx, dialogManager))
 		if idx >= len(items) {
 			return
 		}
 
-		m.mu.Lock()
-		m.selectedIdx = idx
-		m.mu.Unlock()
+		m.writeIntToFSM(ctx, dialogManager, m.selectedIndexKey(), idx)
+		if m.PageSize > 0 {
+			m.writeIntToFSM(ctx, dialogManager, m.currentPageKey(), idx/m.PageSize)
+		}
 
 		if m.onSelect != nil {
-			m.onSelect(ctx, handlerData, update, idx, items[idx])
+			m.onSelect(ctx, dialogManager, update, idx, items[idx])
 		}
 	}
 
-	handlers[m.callbackPrev()] = func(_ context.Context, handlerData *handler.HandlerData, update *tgbotapi.Update) {
-		items := m.resolveItems(m.resolveHandlerData(handlerData))
+	handlers[m.callbackPrev()] = func(ctx context.Context, dialogManager *DialogManager, _ *tgbotapi.Update) {
+		items := m.resolveItems(m.resolveHandlerData(ctx, dialogManager))
 		totalPages := (len(items) + m.PageSize - 1) / m.PageSize
 		if totalPages == 0 {
 			return
 		}
 
-		m.mu.Lock()
-		if m.currentPage > 0 {
-			m.currentPage--
+		page := m.readIntFromDialogManagerFSM(ctx, dialogManager, m.currentPageKey(), 0)
+		if page > 0 {
+			page--
 		} else {
-			m.currentPage = totalPages - 1
+			page = totalPages - 1
 		}
-		m.mu.Unlock()
+
+		m.writeIntToFSM(ctx, dialogManager, m.currentPageKey(), page)
 	}
 
-	handlers[m.callbackNext()] = func(_ context.Context, handlerData *handler.HandlerData, update *tgbotapi.Update) {
-		items := m.resolveItems(m.resolveHandlerData(handlerData))
+	handlers[m.callbackNext()] = func(ctx context.Context, dialogManager *DialogManager, _ *tgbotapi.Update) {
+		items := m.resolveItems(m.resolveHandlerData(ctx, dialogManager))
 		totalPages := (len(items) + m.PageSize - 1) / m.PageSize
 		if totalPages == 0 {
 			return
 		}
 
-		m.mu.Lock()
-		if m.currentPage < totalPages-1 {
-			m.currentPage++
+		page := m.readIntFromDialogManagerFSM(ctx, dialogManager, m.currentPageKey(), 0)
+		if page < totalPages-1 {
+			page++
 		} else {
-			m.currentPage = 0
+			page = 0
 		}
-		m.mu.Unlock()
+
+		m.writeIntToFSM(ctx, dialogManager, m.currentPageKey(), page)
 	}
 
-	handlers[m.callbackPageNoop()] = func(_ context.Context, _ *handler.HandlerData, _ *tgbotapi.Update) {}
+	handlers[m.callbackPageNoop()] = func(_ context.Context, _ *DialogManager, _ *tgbotapi.Update) {}
 
 	return handlers
 }
@@ -222,6 +204,14 @@ func (m *MediaMover) callbackPageNoop() string {
 	return fmt.Sprintf("mediamover:%s:page", m.ID)
 }
 
+func (m *MediaMover) selectedIndexKey() string {
+	return fmt.Sprintf("mediamover:%s:selected_idx", m.ID)
+}
+
+func (m *MediaMover) currentPageKey() string {
+	return fmt.Sprintf("mediamover:%s:current_page", m.ID)
+}
+
 func (m *MediaMover) parseSelectedIndex(update *tgbotapi.Update) int {
 	if update == nil || update.CallbackQuery == nil {
 		return -1
@@ -233,22 +223,28 @@ func (m *MediaMover) parseSelectedIndex(update *tgbotapi.Update) int {
 		return -1
 	}
 
-	var idx int
-	if _, err := fmt.Sscanf(data[len(prefix):], "%d", &idx); err != nil {
+	idx, err := strconv.Atoi(data[len(prefix):])
+	if err != nil {
 		return -1
 	}
 
 	return idx
 }
 
-func (m *MediaMover) resolveHandlerData(handlerData *handler.HandlerData) map[string]interface{} {
-	if handlerData == nil || handlerData.GetterData == nil {
+func (m *MediaMover) resolveHandlerData(ctx context.Context, dialogManager *DialogManager) map[string]interface{} {
+	if dialogManager == nil || dialogManager.dialog == nil || dialogManager.FSM == nil {
 		return map[string]interface{}{}
 	}
 
-	return handlerData.GetterData
+	window := dialogManager.dialog.GetWindow(*dialogManager.FSM.GetState())
+	if window == nil {
+		return map[string]interface{}{}
+	}
+
+	return window.getGetterData(ctx, dialogManager)
 }
 
+// resolveItems возвращает слайс медиа из getter data по ключу m.Items.
 func (m *MediaMover) resolveItems(data map[string]interface{}) []Media {
 	if m == nil || m.Items == "" || data == nil {
 		return nil
@@ -265,4 +261,38 @@ func (m *MediaMover) resolveItems(data map[string]interface{}) []Media {
 	}
 
 	return items
+}
+
+func (m *MediaMover) readIntFromDialogManagerFSM(ctx context.Context, dialogManager *DialogManager, key string, fallback int) int {
+	if dialogManager == nil || dialogManager.FSM == nil {
+		return fallback
+	}
+	return m.readIntFromFSM(*dialogManager.FSM, key, fallback)
+}
+
+func (m *MediaMover) readIntFromFSM(fsm FSMContext, key string, fallback int) int {
+	state := fsm.GetState()
+	if state == nil {
+		return fallback
+	}
+
+	value, exists := state.getData()[key]
+	if !exists || value == "" {
+		return fallback
+	}
+
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+
+	return parsed
+}
+
+func (m *MediaMover) writeIntToFSM(ctx context.Context, dialogManager *DialogManager, key string, value int) {
+	if dialogManager == nil || dialogManager.FSM == nil {
+		return
+	}
+
+	dialogManager.FSM.UpdateStateData(ctx, key, strconv.Itoa(value))
 }
